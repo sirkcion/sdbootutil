@@ -1643,13 +1643,6 @@ pcrlock()
 	SYSTEMD_LOG_LEVEL="${SYSTEMD_LOG_LEVEL:-warning}" "$pcrlock_cmd" "$@"
 }
 
-is_pcr_oracle()
-{
-	[ -e /etc/systemd/tpm2-pcr-public-key.pem ] && \
-	    [ -e /etc/systemd/tpm2-pcr-private-key.pem ] && \
-	    have_pcr_oracle
-}
-
 regex_entries_ids_for_prediction()
 {
 	local snapshot="$1"
@@ -2295,13 +2288,26 @@ generate_tpm2_predictions()
 	[ -e /etc/crypttab ] || return 0
 	grep -q "tpm2-device" /etc/crypttab || return 0
 
-	if is_pcr_oracle; then
-		generate_tpm2_predictions_pcr_oracle
-	elif have_pcrlock; then
+	if [ -z "$arg_signed_policy" ] && have_pcrlock; then
 		is_config_file || { log_info "/etc/sysconfig/fde-tools not found"; return 0; }
 		load_config_file
+		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}" || {
+			echo "Predictions with systemd-pcrlock failed"
+			echo "Re-trying with pcr-oracle"
 
-		generate_tpm2_predictions_pcrlock "${FDE_SEAL_PCR_LIST}"
+			# TODO: cleanup generate_tpm2_predictions_pcrlock
+
+			# Force signed policy during enrollment 
+			arg_signed_policy=1
+
+			generate_rsa_key
+			generate_tpm2_predictions_pcr_oracle
+		}
+	elif have_pcr_oracle; then
+		generate_rsa_key
+		generate_tpm2_predictions_pcr_oracle
+	else
+		log_info "No TMP2 prediction mechanism found"
 	fi
 
 	# Generate a PCR 15 prediction only in certain cases, as for
@@ -2745,10 +2751,6 @@ enroll()
 		fi
 
 		is_config_file || echo "FDE_SEAL_PCR_LIST=${FDE_SEAL_PCR_LIST}" >> /etc/default/fde-tools
-
-		if ! have_pcrlock && have_pcr_oracle; then
-			generate_rsa_key
-		fi
 
 		# During the initial enrollment it is expected that
 		# for systemd-pcrlock the recovery PIN will be
